@@ -1,0 +1,101 @@
+name: xiaomi-mini-router
+
+on:
+
+  push:
+    branches: [ master ]
+    paths:
+      - '.github/workflows/xiaomi_mini.yml'
+
+jobs:
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v2
+        with:
+          ref: master
+
+      - name: Initialization Environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          docker rmi `docker images -q`
+          sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /etc/apt/sources.list.d
+          sudo -E apt-get -y purge azure-cli ghc* zulu* hhvm llvm* firefox google* dotnet* powershell openjdk* mysql* php* android*
+          sudo -E apt-get update
+          sudo -E apt-get -y install build-essential asciidoc binutils bzip2 gawk gettext git libncurses5-dev libz-dev patch python3 unzip zlib1g-dev lib32gcc1 libc6-dev-i386 subversion flex uglifyjs gcc-multilib g++-multilib p7zip p7zip-full msmtp libssl-dev texinfo libglib2.0-dev xmlto qemu-utils upx libelf-dev autoconf automake libtool autopoint device-tree-compiler antlr3 gperf swig
+          sudo -E apt-get -y autoremove --purge
+          sudo -E apt-get clean
+          df -h
+          
+      - name: Install Feeds
+        run: |
+          git clone https://github.com/coolsnowwolf/lede && cd lede/
+          sed -i -E 's/(src-git.+)(freifunk.+)/#\1\2/' feeds.conf.default
+          #sed -i -E 's/#(src-git.+)(helloworld.+)/\1\2/' feeds.conf.default
+          sed -i 's#https://mirrors.cloud.tencent.com/lede#https://openwrt.proxy.ustclug.org#g' package/lean/default-settings/files/zzz-default-settings
+          sed -i '/uci commit luci/i\uci set luci.main.mediaurlbase=/luci-static/argon' package/lean/default-settings/files/zzz-default-settings
+          cd package/lean && rm -rf luci-theme-argon && git clone -b 18.06 https://github.com/jerrykuku/luci-theme-argon && cd ../../
+          
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          
+      - name: Generate Config
+        run: |
+          cd lede/
+          rm -f ./.config*
+          cp ../xiaomi_mini.seed ./.config
+          make defconfig
+          
+      - name: Make Download
+        run: |
+          cd lede/
+          make download -j8 || make download -j1 V=s
+          
+      - name: Compile Firmware
+        run: |
+          cd lede/
+          make -j$(nproc) || make -j1 V=s
+          
+      - name: Prepare Artifact
+        id: prepare_artifact
+        run: |
+          mkdir -p ./artifact/packages
+          cp -rf $(find ./lede/bin/packages/ -type f -name "*.ipk") ./artifact/packages
+          mkdir -p ./artifact/firmware
+          cp -rf $(find ./lede/bin/targets/ -type f -name "*.bin") ./artifact/firmware
+          cd ./artifact/firmware && md5sum *.bin > md5sum.txt && cd ../../
+          zip -p -r firmware.zip ./artifact/firmware
+          
+          release_tag="Xiaomi-MINI-$(date +%Y-%m-%d)"
+          echo "##[set-output name=release_tag;]$release_tag"
+          
+      - name: Deliver Artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: deliver_artifact
+          path: ./artifact
+          
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.SEC_TOKEN }}
+        with:
+          tag_name: ${{ steps.prepare_artifact.outputs.release_tag }}
+          release_name: 自动发布 ${{ steps.prepare_artifact.outputs.release_tag }}
+          draft: false
+          prerelease: false
+          
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.SEC_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./firmware.zip
+          asset_name: ${{ steps.prepare_artifact.outputs.release_tag }}-ROM.zip
+          asset_content_type: application/zip
